@@ -5,89 +5,122 @@ import folium
 from streamlit_folium import st_folium
 import io
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Asómbrate - Diagnóstico Pro", layout="wide")
+# --- CONFIGURACIÓN DE LA PÁGINA ---
+st.set_page_config(page_title="Asómbrate - Diagnóstico Pro", layout="wide", page_icon="🌱")
 
-st.title("🌱 Plataforma de Diagnóstico de Suelos - Asómbrate")
-st.markdown("Extracción automática de KoboToolbox y análisis de pH.")
+# Estilo personalizado para el título
+st.title("🌱 Plataforma de Diagnóstico Asómbrate")
+st.markdown("""
+Esta aplicación extrae datos en tiempo real de **KoboToolbox**, procesa los grupos anidados de suelos 
+y genera un análisis visual de acidez (pH).
+""")
 
-# --- BARRA LATERAL (CONEXIÓN) ---
-st.sidebar.header("Configuración de Datos")
-token = st.sidebar.text_input("Token de Kobo", value="01dbd69d8e9ae587eaeddc25f8cf9f35377cb08c", type="password")
-asset_id = st.sidebar.text_input("Asset UID", value="aRgtiRU7FPKoCEuCTeD7sS")
+# --- BARRA LATERAL (CONFIGURACIÓN) ---
+st.sidebar.image("https://www.asombrate.org/logo.png", width=200) # Opcional: Logo de Asómbrate
+st.sidebar.header("🛠️ Conexión con Kobo")
 
-if st.sidebar.button("🔄 Sincronizar con Kobo"):
+token = st.sidebar.text_input("Token de API Kobo", value="01dbd69d8e9ae587eaeddc25f8cf9f35377cb08c", type="password")
+asset_id = st.sidebar.text_input("Asset UID (Formulario)", value="aRgtiRU7FPKoCEuCTeD7sS")
+
+if st.sidebar.button("🔄 Sincronizar Datos Ahora"):
     headers = {'Authorization': f'Token {token}'}
     url = f'https://kf.kobotoolbox.org/api/v2/assets/{asset_id}/data.json'
     
-    with st.spinner("Descargando datos..."):
-        res = requests.get(url, headers=headers)
-        if res.status_code == 200:
-            datos = res.json()['results']
-            
-            # --- PROCESAMIENTO DE LOS 548 PUNTOS ---
-            reporte = []
-            for enc in datos:
-                prod = enc.get('Nombre_y_apellidos_del_productor', 'Desconocido')
-                grupo = enc.get('group_ub1zk22', [])
-                data_sitios = grupo[0] if isinstance(grupo, list) and len(grupo)>0 else {}
+    with st.spinner("Conectando con el servidor de Kobo..."):
+        try:
+            res = requests.get(url, headers=headers)
+            if res.status_code == 200:
+                datos_raw = res.json()['results']
                 
-                for k, v in data_sitios.items():
-                    if 'Sitio' in k and 'muestra' in k:
-                        try:
-                            partes = v.split()
-                            reporte.append({
-                                'Productor': prod,
-                                'Lat': float(partes[0]), 'Lon': float(partes[1]),
-                                'pH': float(partes[3])
-                            })
-                        except: continue
-            
-            st.session_state['df'] = pd.DataFrame(reporte)
-            st.success(f"¡Sincronizado! {len(reporte)} puntos cargados.")
-        else:
-            st.error("Error al conectar con Kobo. Revisa el Token.")
+                # --- MOTOR DE EXTRACCIÓN (CIRUGÍA DE DATOS) ---
+                reporte_lista = []
+                for encuesta in datos_raw:
+                    productor = encuesta.get('Nombre_y_apellidos_del_productor', 'Desconocido')
+                    fecha = encuesta.get('start', 'N/A')
+                    
+                    # Entramos al grupo específico que detectamos
+                    grupo_sitios = encuesta.get('group_ub1zk22', [])
+                    # Kobo a veces manda el grupo como lista o como dict
+                    data_sitios = grupo_sitios[0] if isinstance(grupo_sitios, list) and len(grupo_sitios) > 0 else grupo_sitios
+                    
+                    if isinstance(data_sitios, dict):
+                        for k, v in data_sitios.items():
+                            if 'Sitio' in k and 'muestra' in k:
+                                try:
+                                    # Formato: 'Latitud Longitud Altitud pH'
+                                    partes = v.split()
+                                    reporte_lista.append({
+                                        'Productor': productor,
+                                        'Fecha': fecha,
+                                        'Latitud': float(partes[0]),
+                                        'Longitud': float(partes[1]),
+                                        'Altitud': float(partes[2]),
+                                        'pH': float(partes[3])
+                                    })
+                                except: continue
+                
+                # Guardamos en el estado de la sesión para no perder datos al filtrar
+                st.session_state['data_final'] = pd.DataFrame(reporte_lista)
+                st.success(f"✅ ¡Éxito! Se cargaron {len(reporte_lista)} puntos de muestreo.")
+            else:
+                st.error(f"❌ Error de Kobo: {res.status_code}. Verifica el Token.")
+        except Exception as e:
+            st.error(f"⚠️ Error de conexión: {e}")
 
-# --- CUERPO PRINCIPAL ---
-if 'df' in st.session_state:
-    df = st.session_state['df']
-    
-    # Métricas rápidas
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Muestras", len(df))
-    c2.metric("Promedio pH", round(df['pH'].mean(), 2))
-    c3.metric("Fincas Analizadas", df['Productor'].nunique())
+# --- CUERPO PRINCIPAL (VISUALIZACIÓN) ---
+if 'data_final' in st.session_state:
+    df = st.session_state['data_final']
 
-    # Mapa Interactivo
-    st.subheader("📍 Mapa de Distribución de Acidez")
-    m = folium.Map(location=[df['Lat'].mean(), df['Lon'].mean()], zoom_start=14)
+    # 1. Métricas de resumen
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Muestras Totales", len(df))
+    col2.metric("pH Promedio", round(df['pH'].mean(), 2))
+    col3.metric("Fincas", df['Productor'].nunique())
+    col4.metric("pH Mínimo", df['pH'].min())
+
+    # 2. Mapa Interactivo
+    st.subheader("📍 Mapa de Acidez en Campo")
     
+    # Crear el mapa base centrado en el promedio
+    m = folium.Map(location=[df['Latitud'].mean(), df['Longitud'].mean()], zoom_start=15, control_scale=True)
+    
+    # Agregar puntos al mapa con colores por pH
     for _, row in df.iterrows():
-        color = 'red' if row['pH'] < 4.5 else 'orange' if row['pH'] < 5.5 else 'green'
+        # Lógica de colores: Rojo (Muy Ácido), Naranja (Ácido), Verde (Óptimo)
+        color_punto = 'red' if row['pH'] < 4.5 else 'orange' if row['pH'] < 5.5 else 'green'
+        
         folium.CircleMarker(
-            location=[row['Lat'], row['Lon']],
-            radius=5,
-            color=color,
+            location=[row['Latitud'], row['Longitud']],
+            radius=6,
+            color=color_punto,
             fill=True,
-            popup=f"Productor: {row['Productor']}<br>pH: {row['pH']}"
+            fill_opacity=0.7,
+            popup=f"<b>Productor:</b> {row['Productor']}<br><b>pH:</b> {row['pH']}<br><b>Altitud:</b> {row['Altitud']} m"
         ).add_to(m)
     
-    st_folium(m, width=1200, height=500)
+    # Renderizar mapa en la App
+    st_folium(m, width=1400, height=600)
 
-    # Tabla y Descarga
-    st.subheader("📋 Datos Detallados")
-    filtro_prod = st.multiselect("Filtrar por Productor", options=df['Productor'].unique())
+    # 3. Filtros y Tabla
+    st.divider()
+    st.subheader("📋 Tabla de Datos y Descarga")
     
-    df_filtrado = df[df['Productor'].isin(filtro_prod)] if filtro_prod else df
-    st.dataframe(df_filtrado, use_container_width=True)
+    filtro_nombre = st.multiselect("Filtrar por nombre del Productor:", options=df['Productor'].unique())
+    
+    df_mostrar = df[df['Productor'].isin(filtro_nombre)] if filtro_nombre else df
+    st.dataframe(df_mostrar, use_container_width=True)
 
-    # Botón de descarga Excel
+    # Botón para descargar a Excel
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_filtrado.to_excel(writer, index=False, sheet_name='Diagnóstico')
+        df_mostrar.to_excel(writer, index=False, sheet_name='Diagnostico_Asombrate')
+    
     st.download_button(
-        label="📥 Descargar Reporte en Excel",
+        label="📥 Descargar Diagnóstico en Excel",
         data=output.getvalue(),
-        file_name="diagnostico_asombrate.xlsx",
+        file_name="diagnostico_asombrate_kobo.xlsx",
         mime="application/vnd.ms-excel"
     )
+
+else:
+    st.info("👈 Haz clic en el botón 'Sincronizar Datos Ahora' de la izquierda para comenzar.")
