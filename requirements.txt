@@ -3,4 +3,9 @@ pandas
 requests
 folium
 streamlit-folium
-scipy  <-- AGREGA ESTA LÍNEA
+xlsxwriter
+pystac-client
+planetary-computer
+stackstac
+xarray
+scipy
