@@ -1,117 +1,67 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import folium
-from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Asómbrate SIG Píxel", layout="wide")
-st.title("🛰️ Análisis de Fusión Ráster: pH ∩ NDVI")
+# --- FUNCIÓN TÉCNICA IDW (IGUAL A QGIS) ---
+def interpolacion_idw(puntos_lat, puntos_lon, valores, target_lat, target_lon, power=2):
+    # Calculamos distancias de los puntos de la finca al píxel actual
+    distancias = np.sqrt((puntos_lat - target_lat)**2 + (puntos_lon - target_lon)**2)
+    # Evitamos división por cero si el píxel coincide exactamente con un punto
+    distancias[distancias == 0] = 0.00001 
+    # Fórmula IDW: Peso = 1 / distancia^potencia
+    pesos = 1 / (distancias**power)
+    return np.sum(pesos * valores) / np.sum(pesos)
 
-# --- 1. PROCESAMIENTO ---
-token = "01dbd69d8e9ae587eaeddc25f8cf9f35377cb08c"
-asset_id = "aRgtiRU7FPKoCEuCTeD7sS"
+# ... (Aquí iría tu parte de conexión a Kobo igual que antes) ...
 
-if st.sidebar.button("🔄 Generar Fusión Píxel a Píxel"):
-    res = requests.get(f'https://kf.kobotoolbox.org/api/v2/assets/{asset_id}/data.json', 
-                       headers={'Authorization': f'Token {token}'})
-    if res.status_code == 200:
-        datos = res.json()['results']
-        reporte = []
-        for enc in datos:
-            prod = enc.get('Nombre_y_apellidos_del_productor', 'Desconocido')
-            grupo = enc.get('group_ub1zk22', [])
-            data = grupo[0] if isinstance(grupo, list) and len(grupo)>0 else grupo
-            if isinstance(data, dict):
-                for k, v in data.items():
-                    if 'Sitio' in k and 'muestra' in k:
-                        try:
-                            p = v.split()
-                            # Extraemos datos reales
-                            reporte.append({
-                                'lat': float(p[0]), 'lon': float(p[1]), 
-                                'ph': float(p[3]), 'productor': prod,
-                                'ndvi': 0.45 if float(p[3]) < 4.2 else 0.7 # Simulación para el ejemplo
-                            })
-                        except: continue
-        st.session_state['df_sig'] = pd.DataFrame(reporte)
-
-# --- 2. MOTOR DE INTERPOLACIÓN Y FUSIÓN ---
 if 'df_sig' in st.session_state:
     df = st.session_state['df_sig']
     productor_sel = st.selectbox("Seleccionar Unidad Productiva:", df['productor'].unique())
-    df_finca = df[df['productor'] == productor_sel]
+    df_finca = df[df['productor'] == productor_sel].reset_index()
 
-    # Creamos el mapa base
     m = folium.Map(
         location=[df_finca['lat'].mean(), df_finca['lon'].mean()], 
-        zoom_start=18,
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google Satélite'
+        zoom_start=18, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satélite'
     )
 
-    # Definimos las capas
-    capa_ph = folium.FeatureGroup(name="Capa 1: Mapa de Calor (pH Interpolado)", show=False)
-    capa_ndvi = folium.FeatureGroup(name="Capa 2: Superficie NDVI", show=False)
-    capa_fusion = folium.FeatureGroup(name="Capa 3: FUSIÓN DIAGNÓSTICO (Píxel)", show=True)
+    capa_fusion = folium.FeatureGroup(name="Fusión Diagnóstico IDW (Estilo QGIS)", show=True)
 
-    # --- LÓGICA DE INTERPOLACIÓN ESPACIAL ---
-    # Creamos una "malla" de píxeles alrededor de la finca
-    lats = np.linspace(df_finca['lat'].min(), df_finca['lat'].max(), 15)
-    lons = np.linspace(df_finca['lon'].min(), df_finca['lon'].max(), 15)
+    # Aumentamos la resolución a 25x25 para que sea más suave
+    res = 25
+    lats = np.linspace(df_finca['lat'].min() - 0.0002, df_finca['lat'].max() + 0.0002, res)
+    lons = np.linspace(df_finca['lon'].min() - 0.0002, df_finca['lon'].max() + 0.0002, res)
 
-    for lt in lats:
-        for ln in lons:
-            # Encontramos el punto de Kobo más cercano para este "píxel" (IDW simplificado)
-            distancias = np.sqrt((df_finca['lat'] - lt)**2 + (df_finca['lon'] - ln)**2)
-            idx_cercano = distancias.idxmin()
-            val_ph = df_finca.loc[idx_cercano, 'ph']
-            val_ndvi = df_finca.loc[idx_cercano, 'ndvi']
+    for i in range(len(lats)-1):
+        for j in range(len(lons)-1):
+            # Interpolamos el pH exacto para este píxel usando IDW
+            ph_pixel = interpolacion_idw(
+                df_finca['lat'], df_finca['lon'], df_finca['ph'], 
+                lats[i], lons[j]
+            )
+            
+            # Interpolamos el NDVI (o usamos el valor del vecino para esta demo)
+            ndvi_pixel = interpolacion_idw(
+                df_finca['lat'], df_finca['lon'], df_finca['ndvi'], 
+                lats[i], lons[j]
+            )
 
-            # 1. Agregar a Capa pH (Interpolada)
-            color_ph = 'red' if val_ph < 4.5 else 'yellow' if val_ph < 5.5 else 'blue'
-            folium.Rectangle(
-                bounds=[[lt, ln], [lt+0.0001, ln+0.0001]],
-                color=color_ph, fill=True, fill_opacity=0.3, weight=0
-            ).add_to(capa_ph)
-
-            # 2. Agregar a Capa NDVI
-            color_ndvi = 'darkgreen' if val_ndvi > 0.5 else 'brown'
-            folium.Rectangle(
-                bounds=[[lt, ln], [lt+0.0001, ln+0.0001]],
-                color=color_ndvi, fill=True, fill_opacity=0.3, weight=0
-            ).add_to(capa_ndvi)
-
-            # 3. CAPA FUSIÓN (INTERSECCIÓN LÓGICA)
-            # Píxel por píxel evaluamos los 4 escenarios
-            if val_ph < 4.5 and val_ndvi < 0.5:
-                res_color, res_diag = '#FF0000', "CRÍTICO" # Rojo Puro
-            elif val_ph < 4.5:
-                res_color, res_diag = '#FFA500', "ALERTA pH" # Naranja
-            elif val_ndvi < 0.5:
-                res_color, res_diag = '#800080', "VIGOR BAJO" # Púrpura
+            # --- LÓGICA DE FUSIÓN DE 4 ESCENARIOS ---
+            if ph_pixel < 4.5 and ndvi_pixel < 0.5:
+                color = '#FF0000' # CRÍTICO
+            elif ph_pixel < 4.5:
+                color = '#FFA500' # ALERTA pH
+            elif ndvi_pixel < 0.5:
+                color = '#800080' # VIGOR BAJO
             else:
-                res_color, res_diag = '#00FF00', "ÓPTIMO" # Verde Brillante
+                color = '#00FF00' # ÓPTIMO
 
             folium.Rectangle(
-                bounds=[[lt, ln], [lt+0.0001, ln+0.0001]],
-                fill=True, fill_color=res_color, fill_opacity=0.6,
-                color=res_color, weight=1,
-                popup=f"Diagnóstico: {res_diag}"
+                bounds=[[lats[i], lons[j]], [lats[i+1], lons[j+1]]],
+                fill=True, fill_color=color, fill_opacity=0.6,
+                color=color, weight=0.5
             ).add_to(capa_fusion)
 
-    # Añadir capas al mapa
-    capa_ph.add_to(m)
-    capa_ndvi.add_to(m)
     capa_fusion.add_to(m)
-    folium.LayerControl().add_to(m)
-
     st_folium(m, width=1200, height=650)
-    
-    st.info("""
-    ✨ **Análisis de Álgebra de Mapas completado:**
-    La Capa 3 es el resultado de la intersección booleana entre el ráster de pH y el ráster de NDVI. 
-    Cada cuadro representa un área de terreno evaluada bajo los 4 criterios de decisión.
-    """)
