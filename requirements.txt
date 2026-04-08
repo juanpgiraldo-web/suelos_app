@@ -4,3 +4,7 @@ requests
 folium
 streamlit-folium
 xlsxwriter
+pystac-client
+planetary-computer
+stackstac
+xarray
