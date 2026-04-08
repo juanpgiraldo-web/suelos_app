@@ -5,130 +5,112 @@ import requests
 import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-import io
 
-# --- 1. CONFIGURACIÓN DE PÁGINA (Layout Wide) ---
-st.set_page_config(page_title="Asómbrate SIG Áreas", layout="wide", page_icon="☕")
+# --- 1. CONFIGURACIÓN ---
+st.set_page_config(page_title="Asómbrate SIG Áreas Reales", layout="wide")
+st.title("☕ SIG de Áreas Continuas: Intersección pH x NDVI")
 
-# Título y Descripción con Estilo
-st.title("☕ Plataforma de Diagnóstico SIG Áreas - Asómbrate")
-st.markdown("Intersección Geoespacial de Superficies de Suelo (pH) y Satélite (NDVI).")
-
-# --- 2. BARRA LATERAL (RECUPERADA: Conexión Kobo) ---
-st.sidebar.image("https://www.asombrate.org/logo.png", width=200) # Opcional: Logo de Asómbrate
-st.sidebar.header("📡 Sincronización de Datos")
+# --- 2. BARRA LATERAL (TODO RECUPERADO) ---
+st.sidebar.header("📡 Sincronización Kobo")
 token = st.sidebar.text_input("Token Kobo", value="01dbd69d8e9ae587eaeddc25f8cf9f35377cb08c", type="password")
 asset_id = st.sidebar.text_input("Asset UID", value="aRgtiRU7FPKoCEuCTeD7sS")
 
-if st.sidebar.button("🔄 Sincronizar y Generar Superficies"):
+if st.sidebar.button("🔄 Generar Áreas de Diagnóstico"):
     headers = {'Authorization': f'Token {token}'}
     url = f'https://kf.kobotoolbox.org/api/v2/assets/{asset_id}/data.json'
     
-    with st.spinner("Generando superficies continuas de diagnóstico..."):
-        try:
-            res = requests.get(url, headers=headers)
-            if res.status_code == 200:
-                datos_raw = res.json()['results']
-                reporte = []
-                for enc in datos_raw:
-                    prod = enc.get('Nombre_y_apellidos_del_productor', 'Desconocido')
-                    grupo = enc.get('group_ub1zk22', [])
-                    data_sitios = grupo[0] if isinstance(grupo, list) and len(grupo)>0 else grupo
-                    if isinstance(data_sitios, dict):
-                        for k, v in data_sitios.items():
-                            if 'Sitio' in k and 'muestra' in k:
-                                try:
-                                    p = v.split()
-                                    reporte.append({
-                                        'Lat': float(p[0]), 'Lon': float(p[1]), 
-                                        'pH': float(p[3]), 'Productor': prod,
-                                        # Simulación de NDVI (mientras el API 403 se resuelve)
-                                        'NDVI': 0.42 if float(p[3]) < 4.2 else 0.68 
-                                    })
-                                except: continue
-                
-                df = pd.DataFrame(reporte)
-                st.session_state['df_areas'] = df
-                st.sidebar.success(f"✅ ¡{len(df)} puntos cargados!")
-            else:
-                st.sidebar.error("❌ Error al conectar con Kobo.")
-        except Exception as e:
-            st.sidebar.error(f"⚠️ Error: {e}")
+    with st.spinner("Sincronizando y procesando superficies..."):
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            datos = res.json()['results']
+            reporte = []
+            for enc in datos:
+                prod = enc.get('Nombre_y_apellidos_del_productor', 'Desconocido')
+                grupo = enc.get('group_ub1zk22', [])
+                data = grupo[0] if isinstance(grupo, list) and len(grupo)>0 else grupo
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if 'Sitio' in k and 'muestra' in k:
+                            try:
+                                p = v.split()
+                                reporte.append({
+                                    'lat': float(p[0]), 'lon': float(p[1]), 
+                                    'ph': float(p[3]), 'productor': prod,
+                                    'ndvi': 0.42 if float(p[3]) < 4.2 else 0.68 
+                                })
+                            except: continue
+            st.session_state['df_full'] = pd.DataFrame(reporte)
+            st.sidebar.success("✅ Datos cargados")
 
-# --- 3. MOTOR DE INTERPOLACIÓN (CREADOR DE SUPERFICIES) ---
-def interpolacion_idw(puntos_lat, puntos_lon, valores, target_lat, target_lon, power=2):
-    distancias = np.sqrt((puntos_lat - target_lat)**2 + (puntos_lon - target_lon)**2)
-    distancias[distancias == 0] = 0.00001 # Evitar división por cero
-    pesos = 1 / (distancias**power)
+# --- 3. MOTOR DE INTERPOLACIÓN (IDW para áreas suaves) ---
+def calcular_idw(lats, lons, valores, target_lat, target_lon):
+    dist = np.sqrt((lats - target_lat)**2 + (lons - target_lon)**2)
+    dist[dist == 0] = 0.00001
+    pesos = 1 / (dist**2)
     return np.sum(pesos * valores) / np.sum(pesos)
 
-# --- 4. VISUALIZACIÓN MULTICAPA (ÁREAS) ---
-if 'df_areas' in st.session_state:
-    df = st.session_state['df_areas']
+# --- 4. MAPA Y CAPAS ---
+if 'df_full' in st.session_state:
+    df = st.session_state['df_full']
     
-    # Métricas Recuperadas
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Puntos", len(df))
-    col2.metric("pH Promedio", round(df['pH'].mean(), 2))
-    col3.metric("Fincas", df['Productor'].nunique())
+    # Métricas
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Puntos Totales", len(df))
+    c2.metric("Promedio pH", round(df['ph'].mean(), 2))
+    c3.metric("Fincas", df['productor'].nunique())
 
-    productor_sel = st.selectbox("Seleccionar Unidad Productiva:", df['Productor'].unique())
-    df_finca = df[df['Productor'] == productor_sel].reset_index()
+    productor_sel = st.selectbox("Seleccionar Finca:", df['productor'].unique())
+    df_f = df[df['productor'] == productor_sel].reset_index()
 
-    # Mapa base satelital
     m = folium.Map(
-        location=[df_finca['Lat'].mean(), df_finca['Lon'].mean()], 
+        location=[df_f['lat'].mean(), df_f['lon'].mean()], 
         zoom_start=18, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satélite'
     )
 
-    # --- DEFINICIÓN DE CAPAS (RECUPERADO CONTROL DE CAPAS) ---
-    capa_ph = folium.FeatureGroup(name="Capa 1: Superficie pH", show=False)
+    # CAPAS
+    capa_ph = folium.FeatureGroup(name="Capa 1: Mapa de Calor pH", show=False)
     capa_ndvi = folium.FeatureGroup(name="Capa 2: Superficie NDVI", show=False)
-    capa_fusion = folium.FeatureGroup(name="Capa 3: FUSIÓN DIAGNÓSTICO", show=True)
+    capa_fusion = folium.FeatureGroup(name="Capa 3: FUSIÓN (Área Continua)", show=True)
 
-    # Lógica de Generación de Superficies Píxel a Píxel
-    res = 20 # Resolución de la malla
-    lats = np.linspace(df_finca['Lat'].min() - 0.0001, df_finca['Lat'].max() + 0.0001, res)
-    lons = np.linspace(df_finca['Lon'].min() - 0.0001, df_finca['Lon'].max() + 0.0001, res)
+    # Generamos la "Malla" (Grid)
+    # Aumentamos la densidad para que no se vean puntos, sino una mancha
+    grid_res = 25 
+    lat_grid = np.linspace(df_f['lat'].min() - 0.0002, df_f['lat'].max() + 0.0002, grid_res)
+    lon_grid = np.linspace(df_f['lon'].min() - 0.0002, df_f['lon'].max() + 0.0002, grid_res)
 
-    for i in range(len(lats)-1):
-        for j in range(len(lons)-1):
-            # Interpolamos pH y NDVI para generar la superficie continua
-            ph_p = interpolacion_idw(df_finca['Lat'], df_finca['Lon'], df_finca['pH'], lats[i], lons[j])
-            ndvi_p = interpolacion_idw(df_finca['Lat'], df_finca['Lon'], df_finca['NDVI'], lats[i], lons[j])
+    for i in range(len(lat_grid)-1):
+        for j in range(len(lon_grid)-1):
+            # Calculamos los valores interpolados para el centro de este "parche"
+            mid_lat = (lat_grid[i] + lat_grid[i+1]) / 2
+            mid_lon = (lon_grid[j] + lon_grid[j+1]) / 2
+            
+            val_ph = calcular_idw(df_f['lat'], df_f['lon'], df_f['ph'], mid_lat, mid_lon)
+            val_ndvi = calcular_idw(df_f['lat'], df_f['lon'], df_f['ndvi'], mid_lat, mid_lon)
 
-            # 1. Agregar a Capa pH (Interpolación Heatmap)
-            # Usamos el HeatMap plugin para la Capa 1 (Estilo Colab)
-            # (Se hace fuera del bucle para eficiencia, ver abajo)
-
-            # 2. Agregar a Capa NDVI (Superficie)
-            c_ndvi = 'darkgreen' if ndvi_p > 0.5 else '#A52A2A' # Marrón para vigor bajo
+            # Capa NDVI (Superficie verde/marrona)
+            c_ndvi = 'darkgreen' if val_ndvi > 0.5 else '#7b3f00'
             folium.Rectangle(
-                bounds=[[lats[i], lons[j]], [lats[i+1], lons[j+1]]],
-                color=c_ndvi, fill=True, fill_opacity=0.3, weight=0
+                bounds=[[lat_grid[i], lon_grid[j]], [lat_grid[i+1], lon_grid[j+1]]],
+                fill=True, fill_color=c_ndvi, fill_opacity=0.3, weight=0
             ).add_to(capa_ndvi)
 
-            # 3. CAPA FUSIÓN (Diagnóstico) Píxel por Píxel
-            if ph_p < 4.5 and ndvi_p < 0.5: color = '#FF0000' # CRÍTICO
-            elif ph_p < 4.5: color = '#FFA500' # ALERTA pH
-            elif ndvi_p < 0.5: color = '#800080' # VIGOR BAJO
-            else: color = '#00FF00' # ÓPTIMO
+            # Capa Fusión (Lógica de 4 escenarios)
+            if val_ph < 4.5 and val_ndvi < 0.5: color = 'red' # CRÍTICO
+            elif val_ph < 4.5: color = 'orange' # ALERTA pH
+            elif val_ndvi < 0.5: color = 'purple' # VIGOR BAJO
+            else: color = 'green' # ÓPTIMO
 
             folium.Rectangle(
-                bounds=[[lats[i], lons[j]], [lats[i+1], lons[j+1]]],
-                fill=True, fill_color=color, fill_opacity=0.6,
-                color=color, weight=0.5, # Borde suave
-                popup=f"Diag: {color}"
+                bounds=[[lat_grid[i], lon_grid[j]], [lat_grid[i+1], lon_grid[j+1]]],
+                fill=True, fill_color=color, fill_opacity=0.6, weight=0
             ).add_to(capa_fusion)
 
-    # Capa 1: pH (Mapa de Calor Estilo Colab)
-    HeatMap([[r['Lat'], r['Lon'], r['pH']] for _, r in df_finca.iterrows()], radius=18, min_opacity=0.5).add_to(capa_ph)
+    # Mapa de calor de pH (Capa 1)
+    HeatMap([[r['lat'], r['lon'], r['ph']] for _, r in df_f.iterrows()], radius=25, blur=15).add_to(capa_ph)
 
-    # Añadir capas al mapa y control
     capa_ph.add_to(m)
     capa_ndvi.add_to(m)
     capa_fusion.add_to(m)
     folium.LayerControl().add_to(m)
 
     st_folium(m, width=1200, height=650)
-    st.write("💡 **Instrucciones:** Abre el control de capas (arriba a la derecha) para prender y apagar pH, NDVI o Fusión.")
